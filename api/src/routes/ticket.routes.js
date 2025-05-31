@@ -5,7 +5,8 @@ const {
   createTicket,
   updateTicket,
   deleteTicket,
-  getMyTickets
+  getMyTickets,
+  checkout
 } = require('../controllers/ticket.controller');
 const { protect } = require('../middleware/auth.middleware');
 
@@ -18,6 +19,9 @@ router.route('/')
 
 // Kullanıcının kendi biletlerini görebileceği endpoint
 router.get('/my-tickets', protect, getMyTickets);
+
+// Ödeme tamamlama işlemi
+router.post('/checkout', protect, checkout);
 
 // Spesifik bilet işlemleri
 router.route('/:id')

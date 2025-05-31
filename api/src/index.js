@@ -50,7 +50,7 @@ app.use((req, res) => {
   });
 });
 
-const PORT = process.env.PORT || 5001;
+const PORT = process.env.PORT || 5010; // 5000 ve 5001 çakışması olabileceği için farklı bir port kullanıyoruz
 
 const server = app.listen(PORT, () => {
   console.log(`Server ${PORT} portunda çalışıyor`);

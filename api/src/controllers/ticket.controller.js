@@ -1,7 +1,8 @@
 const Ticket = require('../models/ticket.model');
 const Event = require('../models/event.model');
 const QRCode = require('qrcode');
-const nodemailer = require('nodemailer');
+const { sendTicketMail } = require('../utils/mailService');
+
 
 // @desc    Bilet satın al / sepete ekle
 // @route   POST /api/tickets
@@ -154,22 +155,81 @@ exports.removeTicket = async (req, res) => {
 // @access  Private
 exports.checkout = async (req, res) => {
   try {
-    // Sepetteki tüm biletleri getir
-    const tickets = await Ticket.find({
+    // İstek gövdesinden gelen verileri kontrol et
+    const { items, cardDetails } = req.body;
+
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Geçerli bilet bilgileri bulunamadı'
+      });
+    }
+
+    // Kart bilgileri kontrolü (simülasyon amaçlı)
+    if (!cardDetails || !cardDetails.cardNumber || !cardDetails.expiryDate || !cardDetails.cvc) {
+      return res.status(400).json({
+        success: false,
+        message: 'Geçersiz kart bilgileri'
+      });
+    }
+
+    // İşlemi başlatmak için sepetteki bilet verilerini kontrol et
+    // Önce veritabanındaki bekleyen biletleri kontrol et
+    let tickets = await Ticket.find({
       userId: req.user._id,
       status: 'pending',
       isPaid: false,
     });
 
+    // Veritabanında bekleyen bilet yoksa, istek ile gelen bilet bilgileriyle yeni biletler oluştur
     if (tickets.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Sepetinizde bilet bulunmuyor',
-      });
+      // İstek ile gelen bilet verilerini kullanarak yeni biletler oluştur
+      const newTickets = [];
+      for (const item of items) {
+        // Etkinliği kontrol et
+        const event = await Event.findById(item.eventId);
+        if (!event) {
+          return res.status(404).json({
+            success: false,
+            message: `Etkinlik bulunamadı: ${item.eventId}`
+          });
+        }
+
+        // Etkinlik onaylı mı kontrol et
+        if (!event.isApproved) {
+          return res.status(400).json({
+            success: false,
+            message: `Bu etkinlik için henüz bilet satışı başlamadı: ${event.title}`
+          });
+        }
+
+        // Yeterli bilet var mı kontrol et
+        if (event.availableTickets < item.quantity) {
+          return res.status(400).json({
+            success: false,
+            message: `Bu etkinlik için yeterli bilet kalmadı: ${event.title}`
+          });
+        }
+
+        // Yeni bilet oluştur
+        const ticket = new Ticket({
+          userId: req.user._id,
+          eventId: item.eventId,
+          price: item.price,
+          status: 'pending',
+          isPaid: false,
+          purchaseDate: new Date()
+        });
+        await ticket.save();
+        newTickets.push(ticket);
+      }
+      
+      // Yeni oluşturulan biletleri tickets değişkenine ata
+      tickets = newTickets;
     }
 
-    // Simülasyon: Gerçek projede burada iyzico veya başka bir ödeme entegrasyonu olacak
-    // Şu anda direkt olarak başarılı kabul ediyoruz
+    // Ödeme simülasyonu (gerçek projelerde burada kart validasyonu ve ödeme entegrasyonu yapılır)
+    console.log('Ödeme simülasyonu yapılıyor - kart numarası:', cardDetails.cardNumber.slice(-4));
 
     // Biletlerin toplam tutarını hesapla
     let totalAmount = 0;
@@ -196,25 +256,65 @@ exports.checkout = async (req, res) => {
       ticket.qrCode = qrCodeImage;
       await ticket.save();
 
-      updatedTickets.push(ticket);
-    }
-
-    // E-posta gönderimi simülasyonu (gerçek projede ayarlanmalı)
-    // Bu kısım nodemailer ile gerçekleştirilecek
-
+      updatedTickets.push(ticket);    }      // E-posta gönderimi
+    let emailSuccess = true;
+    try {
+      for (const ticket of updatedTickets) {
+        const event = await Event.findById(ticket.eventId);
+        if (!event) {
+          console.error(`Etkinlik bulunamadı: ${ticket.eventId}`);
+          continue;
+        }
+        
+        // QR kodu API üzerinden oluştur - dışarıdan erişilebilir URL kullan
+        const qrCodeData = `ticket-${ticket._id}-event-${event._id}-user-${ticket.userId}`;
+        const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qrCodeData)}`;
+        
+        // Etkinlik bilgilerini düzenle
+        const formattedDate = event.date 
+          ? new Date(event.date).toLocaleDateString('tr-TR', {
+              day: 'numeric', 
+              month: 'long', 
+              year: 'numeric'
+            }) 
+          : 'Belirtilmemiş';
+          
+        const emailResult = await sendTicketMail(req.user.email, {
+          name: event.title,
+          date: formattedDate,
+          time: event.time || 'Belirtilmemiş',
+          location: event.location || 'Belirtilmemiş',
+          qrCode: qrCodeUrl // QR kod URL'ini ekle
+        });
+        
+        if (!emailResult) {
+          emailSuccess = false;
+          console.error(`${req.user.email} adresine e-posta gönderimi başarısız oldu.`);
+        } else {
+          console.log(`Başarılı e-posta gönderimi: ${req.user.email}`);
+        }
+      }
+    } catch (emailError) {
+      emailSuccess = false;
+      console.error('E-posta gönderimi sırasında hata:', emailError);
+    }    // Başarı durumuna göre mesaj oluştur
+    const responseMessage = emailSuccess 
+      ? 'Ödeme başarıyla tamamlandı. Biletleriniz e-posta adresinize gönderildi.' 
+      : 'Ödeme başarıyla tamamlandı, ancak bilet e-postaları gönderilemedi. Lütfen "Biletlerim" sayfasından biletlerinize erişin.';
+      
     res.status(200).json({
       success: true,
       data: updatedTickets,
       totalAmount,
-      message: 'Ödeme başarıyla tamamlandı. Biletleriniz e-posta adresinize gönderildi.',
+      emailSent: emailSuccess,
+      message: responseMessage,
     });
   } catch (error) {
     res.status(500).json({
       success: false,
       message: 'Ödeme işlemi başarısız',
       error: error.message,
-    });
-  }
+    });  }
 };
 
 // @desc    Kullanıcının tüm biletlerini getir
@@ -373,3 +473,5 @@ exports.deleteTicket = async (req, res) => {
     });
   }
 };
+
+    
